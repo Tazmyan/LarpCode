@@ -20,9 +20,19 @@ env:
 
 jobs:
   build:
-    name: build
-    if: github.repository == 'Tazmyan/LarpCode'
-    runs-on: windows-latest
+    name: build-${{ matrix.platform }}
+    if: github.repository == 'NoNameBuilder/LarpCode'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: darwin
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -56,10 +66,10 @@ jobs:
 
       - name: Fetch Tor and curl-impersonate
         env:
-          TOR_EXPERT_URL: ${{ vars.TOR_EXPERT_URL }}
-          TOR_EXPERT_SHA256: ${{ vars.TOR_EXPERT_SHA256 }}
-          CURL_IMPERSONATE_URL: ${{ vars.CURL_IMPERSONATE_URL }}
-          CURL_IMPERSONATE_SHA256: ${{ vars.CURL_IMPERSONATE_SHA256 }}
+          TOR_EXPERT_URL: ${{ matrix.platform == 'win32' && vars.TOR_EXPERT_URL_WIN || matrix.platform == 'linux' && vars.TOR_EXPERT_URL_LINUX || vars.TOR_EXPERT_URL_MAC }}
+          TOR_EXPERT_SHA256: ${{ matrix.platform == 'win32' && vars.TOR_EXPERT_SHA256_WIN || matrix.platform == 'linux' && vars.TOR_EXPERT_SHA256_LINUX || vars.TOR_EXPERT_SHA256_MAC }}
+          CURL_IMPERSONATE_URL: ${{ matrix.platform == 'win32' && vars.CURL_IMPERSONATE_URL_WIN || matrix.platform == 'linux' && vars.CURL_IMPERSONATE_URL_LINUX || vars.CURL_IMPERSONATE_URL_MAC }}
+          CURL_IMPERSONATE_SHA256: ${{ matrix.platform == 'win32' && vars.CURL_IMPERSONATE_SHA256_WIN || matrix.platform == 'linux' && vars.CURL_IMPERSONATE_SHA256_LINUX || vars.CURL_IMPERSONATE_SHA256_MAC }}
         run: bun run script/fetch-installer-deps.ts
 
       - name: Build bundled CLI
@@ -79,7 +89,9 @@ jobs:
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
         run: bun run --cwd packages/desktop build
 
-      - name: Build installer
+      # ---------- Windows packaging ----------
+      - name: Build Windows installer
+        if: matrix.platform == 'win32'
         shell: pwsh
         run: |
           $candidates = @(
@@ -95,13 +107,27 @@ jobs:
           $env:ISCC = $iscc
           bun run script/stage-installer.ts
 
-      - name: Assemble release assets
-        run: bun run script/release-assets.ts
+      # ---------- Linux packaging ----------
+      - name: Build Linux packages (AppImage / deb)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools rpm
+          bun run script/stage-installer.ts --platform linux
 
-      - name: Upload release assets
+      # ---------- macOS packaging ----------
+      - name: Build macOS packages (dmg / zip)
+        if: matrix.platform == 'darwin'
+        run: |
+          bun run script/stage-installer.ts --platform darwin
+
+      - name: Assemble platform-specific release assets
+        run: bun run script/release-assets.ts --platform ${{ matrix.platform }}
+
+      - name: Upload platform artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets
+          name: release-assets-${{ matrix.platform }}
           path: dist/release
           if-no-files-found: error
           retention-days: 7
@@ -109,17 +135,18 @@ jobs:
   publish:
     name: publish
     needs: build
-    if: github.repository == 'Tazmyan/LarpCode' && github.ref_type == 'tag'
+    if: github.repository == 'NoNameBuilder/LarpCode' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - name: Download release assets
+      - name: Download all platform artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-assets
+          pattern: release-assets-*
           path: dist/release
+          merge-multiple: true
 
       - name: Verify checksums
         working-directory: dist/release
@@ -135,8 +162,14 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/release/LarpCode-Setup.exe
+            dist/release/LarpCode-*.dmg
+            dist/release/LarpCode-*.zip
+            dist/release/LarpCode-*.AppImage
+            dist/release/LarpCode-*.deb
             dist/release/larpcode.exe
+            dist/release/larpcode
             dist/release/install-cli.ps1
+            dist/release/install-cli.sh
             dist/release/cli.json
             dist/release/LarpCode-${{ needs.build.outputs.version }}-source.zip
             dist/release/update.json
